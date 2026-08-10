@@ -58,10 +58,31 @@
 - フィードバック部分に引用ブロック（行頭の `>`）は使わない（スマホアプリが回答欄と誤認するため）
 - 学習者の回答（引用ブロック内）は絶対に書き換えない
 
+## 自動化（完成フォーマット）
+
+毎朝 **日本時間 4:00** に当日の宿題を自動作成する。
+
+| 部品 | 役割 |
+|------|------|
+| `DAILY.md` / `自動化/宿題生成指示.md` | 宿題生成エージェントへの指示文 |
+| `FEEDBACK.md` / `自動化/添削指示.md` | 回答提出後の添削エージェントへの指示文 |
+| `.github/workflows/daily-homework.yml` | 毎朝4時（JST）に Cursor Cloud Agent を起動するスケジューラ |
+
+### 毎朝4時が動かないときのチェック（必須）
+1. GitHub → Settings → Secrets → Actions に **`CURSOR_API_KEY`** があるか  
+   （発行元: [Cursor Dashboard → API Keys](https://cursor.com/dashboard/api)）
+2. Actions タブで **Daily homework** ワークフローが有効か（手動なら Run workflow で即テスト可）
+3. Cursor 側で `tomoki4917/stock` への GitHub 書き込み連携が有効か（main へ直接 push する）
+
+※ 指示ファイルだけではスケジュールは動かない。起動は GitHub Actions → Cursor API が担う。
+
 ## フォルダ構成
 ```
 投資学習/
 ├── README.md              ← このファイル
+├── DAILY.md / FEEDBACK.md ← 自動化用の指示（英名）
+├── .github/workflows/     ← 毎朝4時の起動
+├── 自動化/                ← 指示の日本語コピー
 ├── テンプレート/
 │   └── 宿題テンプレート.md
 └── 宿題/

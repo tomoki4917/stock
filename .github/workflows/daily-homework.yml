@@ -1,0 +1,111 @@
+# 毎朝 日本時間 4:00 に Cursor Cloud Agent を起動し、当日の宿題を作成・main へ push する。
+#
+# GitHub の schedule は UTC のみ。JST は DST なし（UTC+9）なので:
+#   `0 19 * * *` → 毎日 04:00 JST（例: 2026-08-09 19:00 UTC = 2026-08-10 04:00 JST）
+#
+# 事前準備（1回だけ）:
+#   1. https://cursor.com/dashboard/api で API Key を発行
+#   2. GitHub → Settings → Secrets and variables → Actions に
+#      `CURSOR_API_KEY` を登録
+#   3. Cursor 側で GitHub リポジトリ tomoki4917/stock への書き込み権限が有効であること
+#
+# 手動テスト: Actions → Daily homework → Run workflow
+#
+# 動かないとき:
+#   - CURSOR_API_KEY 未設定 / 期限切れ
+#   - Actions が無効、または長期無操作で schedule が停止
+#   - Cursor が main へ直接 push できない（GitHub 連携・権限）
+
+name: Daily homework
+
+on:
+  schedule:
+    - cron: "0 19 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  launch-cursor-agent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout (for DAILY.md prompt)
+        uses: actions/checkout@v4
+
+      - name: Log runner time
+        run: |
+          echo "Runner UTC: $(date -u '+%Y-%m-%d %H:%M:%S')"
+          echo "Runner JST: $(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M:%S')"
+          echo "Target homework date (JST): $(TZ=Asia/Tokyo date '+%Y-%m-%d')"
+
+      - name: Require CURSOR_API_KEY
+        env:
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+        run: |
+          if [ -z "${CURSOR_API_KEY:-}" ]; then
+            echo "::error::Secret CURSOR_API_KEY が未設定です。Cursor Dashboard → API Keys で発行し、GitHub Actions secrets に登録してください。"
+            exit 1
+          fi
+
+      - name: Launch Cursor Cloud Agent (DAILY.md)
+        env:
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+        run: |
+          set -euo pipefail
+
+          PROMPT="$(cat DAILY.md)"
+          PROMPT="${PROMPT}"$'\n\n'"補足: 日本時間の今日の日付は $(TZ=Asia/Tokyo date '+%Y-%m-%d') です。main ブランチに直接 commit & push してください（PR は作らない）。"
+
+          # JSON 用にプロンプトをエスケープ
+          JST_DATE="$(TZ=Asia/Tokyo date '+%Y-%m-%d')"
+          BODY=$(PROMPT="$PROMPT" JST_DATE="$JST_DATE" python3 - <<'PY'
+          import json, os
+          prompt = os.environ["PROMPT"]
+          jst_date = os.environ["JST_DATE"]
+          body = {
+            "prompt": {"text": prompt},
+            "name": f"Daily homework {jst_date}",
+            "repos": [
+              {
+                "url": "https://github.com/tomoki4917/stock",
+                "startingRef": "main",
+              }
+            ],
+            # DAILY.md は main へ直接 push する前提
+            "workOnCurrentBranch": True,
+            "autoCreatePR": False,
+          }
+          print(json.dumps(body, ensure_ascii=False))
+          PY
+          )
+
+          echo "Launching Cursor Cloud Agent…"
+          HTTP_CODE=$(curl --silent --show-error --output /tmp/cursor-agent-response.json --write-out "%{http_code}" \
+            --request POST \
+            --url "https://api.cursor.com/v1/agents" \
+            -u "${CURSOR_API_KEY}:" \
+            --header "Content-Type: application/json" \
+            --data "$BODY")
+
+          echo "HTTP status: ${HTTP_CODE}"
+          cat /tmp/cursor-agent-response.json
+          echo
+
+          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+            echo "::error::Cursor Cloud Agents API が失敗しました (HTTP ${HTTP_CODE})"
+            exit 1
+          fi
+
+          python3 - <<'PY'
+          import json
+          with open("/tmp/cursor-agent-response.json") as f:
+            data = json.load(f)
+          agent = data.get("agent") or {}
+          run = data.get("run") or {}
+          print(f"agent.id: {agent.get('id')}")
+          print(f"agent.url: {agent.get('url')}")
+          print(f"run.id: {run.get('id')}")
+          print(f"run.status: {run.get('status')}")
+          PY
