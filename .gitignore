@@ -3,3 +3,8 @@ app/
 
 # アクセストークンを含むためコミット禁止
 QRコード_設定用.html
+
+# Python / デバッグ出力
+__pycache__/
+*.pyc
+.debug/

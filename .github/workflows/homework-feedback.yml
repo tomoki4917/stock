@@ -30,7 +30,7 @@ jobs:
     env:
       TZ: Asia/Tokyo
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-  GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
+      GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
