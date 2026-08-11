@@ -16,10 +16,15 @@
 3. Agent が「AIフィードバック: <ファイル名>」で commit & push
 4. アプリが添削到着を検知して表示
 
-## 必要なシークレット（1回だけ）
-- 名前: `CURSOR_API_KEY`
-- 発行: https://cursor.com/dashboard/api
-- 登録先: GitHub リポジトリ → Settings → Secrets and variables → Actions
+## 必要なシークレット
+| Secret | 用途 | 必須 |
+|--------|------|------|
+| `GEMINI_API_KEY` | 宿題添削（Gemini API） | ✅ |
+| `GEMINI_MODEL` | 使用モデル（例: `gemini-2.5-flash`） | 任意 |
+| `CURSOR_API_KEY` | 毎朝4時の宿題生成 | ✅ |
+
+発行: https://aistudio.google.com/apikey
+登録先: GitHub → Settings → Secrets and variables → Actions
 
 ## 手動テスト
 Actions → Daily homework → Run workflow

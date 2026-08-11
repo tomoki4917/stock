@@ -82,10 +82,11 @@
 ※ 指示ファイルだけではスケジュールは動かない。起動は GitHub Actions → Cursor API が担う。
 
 ### 添削（AIアドバイス）が届かないとき
-1. 保存後、GitHub → Actions → **Homework feedback** が起動しているか確認
-2. `CURSOR_API_KEY` が設定されているか（Daily homework と共通）
-3. 添削完了まで **5〜15分** かかることがある（Cloud Agent の処理時間）
-4. 手動で再実行: Actions → Homework feedback → Run workflow
+1. 保存後、GitHub → Actions → **Homework feedback (Gemini)** が起動しているか確認
+2. Secret **`GEMINI_API_KEY`** が設定されているか
+3. 添削完了まで **1〜3分** 程度（Gemini API 直接呼び出し）
+4. 手動で再実行: Actions → Homework feedback (Gemini) → Run workflow
+5. 古い回答だけでは再実行されない場合がある → 宿題をもう一度保存する
 
 ## フォルダ構成
 ```

@@ -6,6 +6,36 @@ import os
 import re
 import subprocess
 import sys
+import urllib.error
+import urllib.request
+
+
+DEFAULT_MODELS = [
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+]
+
+RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "q_comments": {
+            "type": "object",
+            "additionalProperties": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 3,
+                "maxItems": 3,
+            },
+        },
+        "overall": {
+            "type": "array",
+            "items": {"type": "string"},
+            "minItems": 1,
+        },
+    },
+    "required": ["q_comments", "overall"],
+}
 
 
 def parse_questions(text: str):
@@ -65,10 +95,54 @@ def extract_prompt_parts(file_text: str):
     return payload
 
 
-def gemini_generate(payload, feedback_md, watchlist_text, tz_date):
+def call_gemini(model: str, prompt: str) -> dict:
     api_key = os.environ["GEMINI_API_KEY"]
-    model = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash")
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}"
+        f":generateContent?key={api_key}"
+    )
+    body = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0.4,
+            "responseMimeType": "application/json",
+            "responseSchema": RESPONSE_SCHEMA,
+        },
+    }
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        err_body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Gemini HTTP {exc.code} ({model}): {err_body[:500]}") from exc
 
+    if "error" in data:
+        raise RuntimeError(f"Gemini error ({model}): {json.dumps(data['error'], ensure_ascii=False)}")
+
+    candidates = data.get("candidates") or []
+    if not candidates:
+        raise RuntimeError(f"Gemini returned no candidates ({model})")
+
+    text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+    if not text:
+        raise RuntimeError(f"Gemini returned empty text ({model})")
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        m = re.search(r"\{.*\}", text, re.S)
+        if not m:
+            raise RuntimeError(f"Gemini output is not JSON ({model}): {text[:300]}")
+        return json.loads(m.group(0))
+
+
+def gemini_generate(payload, feedback_md, watchlist_text, tz_date):
     prompt = (
         f"{feedback_md}\n\n"
         f"--- 対象宿題（学生回答のみ） ---\n"
@@ -76,51 +150,25 @@ def gemini_generate(payload, feedback_md, watchlist_text, tz_date):
         f"--- 追加情報 ---\n"
         f"監視銘柄.json:\n{watchlist_text}\n\n"
         f"今日の日付: {tz_date}\n\n"
-        "出力要件（最重要）:\n"
-        "1) 返信は JSON だけ（前後に文章を付けない）\n"
-        "2) JSON スキーマ:\n"
-        "{\n"
-        '  "q_comments": {\n'
-        '    "Q1": ["良い点: ...", "惜しい点/訂正: ...", "次に調べる用語: ..."],\n'
-        '    "Q2": ["...","...","..."]\n'
-        "  },\n"
-        '  "overall": ["総評（短く）: ..."]\n'
-        "}\n"
-        "3) 各 Q コメント配列は必ず3要素\n"
-        "4) 用語や指摘は初心者向けに短く、事実/推測を分けて書く\n"
+        "各回答済み設問について q_comments に3行（良い点/惜しい点/次に調べる用語）を書く。"
+        "overall には短い総評を1行以上書く。"
     )
 
-    url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/{model}"
-        f":generateContent?key={api_key}"
-    )
-    body = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.4},
-    }
-    res = subprocess.check_output(
-        [
-            "curl",
-            "-sS",
-            "-X",
-            "POST",
-            url,
-            "-H",
-            "Content-Type: application/json",
-            "--data",
-            json.dumps(body, ensure_ascii=False),
-        ],
-        text=True,
-    )
-    data = json.loads(res)
-    if "error" in data:
-        raise RuntimeError(json.dumps(data["error"], ensure_ascii=False))
+    preferred = os.environ.get("GEMINI_MODEL", "").strip()
+    models = [preferred] if preferred else []
+    for model in DEFAULT_MODELS:
+        if model not in models:
+            models.append(model)
 
-    text = data["candidates"][0]["content"]["parts"][0].get("text", "")
-    m = re.search(r"\{.*\}", text, re.S)
-    if not m:
-        raise RuntimeError("Gemini output does not contain JSON")
-    return json.loads(m.group(0))
+    last_error = None
+    for model in models:
+        try:
+            print(f"Calling Gemini model: {model}")
+            return call_gemini(model, prompt)
+        except RuntimeError as exc:
+            last_error = exc
+            print(f"Model failed: {exc}", file=sys.stderr)
+    raise RuntimeError(f"All Gemini models failed. Last error: {last_error}")
 
 
 def rewrite_file(path: str, feedback_md: str, watchlist_text: str, tz_date: str):
@@ -130,6 +178,7 @@ def rewrite_file(path: str, feedback_md: str, watchlist_text: str, tz_date: str)
     sections, ai_header_idx, lines = parse_questions(original)
     payload = extract_prompt_parts(original)
     if not payload:
+        print(f"No answered questions in {path}")
         return False
 
     model_out = gemini_generate(payload, feedback_md, watchlist_text, tz_date)
@@ -147,7 +196,7 @@ def rewrite_file(path: str, feedback_md: str, watchlist_text: str, tz_date: str)
         if not bullets:
             continue
         block = [f"**AIコメント（{tz_date}）**"]
-        block.extend(f"- {b}" for b in bullets)
+        block.extend(f"- {b}" for b in bullets[:3])
         insert_map[ans_end] = block
 
     out_lines = []
@@ -186,11 +235,24 @@ def rewrite_file(path: str, feedback_md: str, watchlist_text: str, tz_date: str)
         out_text = "\n".join(out_lines) + "\n"
 
     if out_text == original:
+        print(f"No changes needed for {path}")
         return False
 
     with open(path, "w", encoding="utf-8") as f:
         f.write(out_text)
     return True
+
+
+def git_push():
+    token = os.environ.get("GITHUB_TOKEN", "")
+    if token:
+        remote = (
+            f"https://x-access-token:{token}@github.com/"
+            f"{os.environ.get('GITHUB_REPOSITORY', 'tomoki4917/stock')}.git"
+        )
+        subprocess.check_call(["git", "push", remote, "HEAD:main"])
+    else:
+        subprocess.check_call(["git", "push", "origin", "HEAD:main"])
 
 
 def main():
@@ -212,6 +274,7 @@ def main():
 
     changed_any = False
     for path in changed_files:
+        print(f"Processing {path}")
         if rewrite_file(path, feedback_md, watchlist_text, tz_date):
             changed_any = True
 
@@ -226,7 +289,8 @@ def main():
     subprocess.check_call(["git", "add", "宿題"])
     commit_target = changed_files[0]
     subprocess.check_call(["git", "commit", "-m", f"AIフィードバック: {commit_target}"])
-    subprocess.check_call(["git", "push"])
+    git_push()
+    print("Feedback committed and pushed.")
 
 
 if __name__ == "__main__":

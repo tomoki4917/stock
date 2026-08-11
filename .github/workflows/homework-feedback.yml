@@ -1,6 +1,9 @@
 # 宿題回答（スマホから保存）の push を検知し、Gemini API で AI 添削を実行する。
 #
-# 事前準備: GitHub Secret に GEMINI_API_KEY を登録
+# 事前準備:
+#   - GitHub Secret: GEMINI_API_KEY（必須）
+#   - GitHub Secret: GEMINI_MODEL（任意。未設定なら gemini-2.5-flash 等を自動試行）
+#
 # 手動テスト: Actions → Homework feedback (Gemini) → Run workflow
 
 name: Homework feedback (Gemini)
@@ -27,13 +30,15 @@ jobs:
     env:
       TZ: Asia/Tokyo
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      GEMINI_MODEL: gemini-1.5-flash
+      GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 2
+          persist-credentials: true
 
       - name: Validate secret
         run: |
