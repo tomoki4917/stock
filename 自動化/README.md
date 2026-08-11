@@ -10,6 +10,12 @@
 - 編集: スマホアプリ「宿題ノート」→ **監視銘柄** からフォーム入力して保存
 - 宿題は監視銘柄をローテーションしながら、実践スキル（売買判断・指標の読み方など）を毎日1つずつ積み上げる
 
+## 添削（宿題回答後）
+1. 宿題ノートアプリで回答を保存 →「宿題回答（スマホから）」で push
+2. GitHub Actions（`homework-feedback.yml`）が FEEDBACK.md をプロンプトに Cursor Agent を起動
+3. Agent が「AIフィードバック: <ファイル名>」で commit & push
+4. アプリが添削到着を検知して表示
+
 ## 必要なシークレット（1回だけ）
 - 名前: `CURSOR_API_KEY`
 - 発行: https://cursor.com/dashboard/api

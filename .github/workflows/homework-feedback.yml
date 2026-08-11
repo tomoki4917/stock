@@ -1,0 +1,123 @@
+# 宿題回答（スマホから保存）の push を検知し、Cursor Cloud Agent で AI 添削を実行する。
+#
+# 流れ:
+#   1. 宿題ノートアプリが「宿題回答（スマホから）」で commit & push
+#   2. このワークフローが FEEDBACK.md をプロンプトに Cursor Agent を起動
+#   3. Agent が「AIフィードバック: <ファイル名>」で commit & push
+#   4. アプリがその commit を検知して添削を表示
+#
+# 事前準備: CURSOR_API_KEY（Daily homework と同じ Secret）
+# 手動テスト: Actions → Homework feedback → Run workflow
+
+name: Homework feedback
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "宿題/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  launch-feedback-agent:
+    # 無限ループ防止: 宿題回答の commit のみ（AIフィードバック自身では起動しない）
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.head_commit.message, '宿題回答')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout (for FEEDBACK.md prompt)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Log trigger
+        run: |
+          echo "Event: ${{ github.event_name }}"
+          echo "Commit: ${{ github.sha }}"
+          echo "Message: ${{ github.event.head_commit.message }}"
+
+      - name: Require CURSOR_API_KEY
+        env:
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+        run: |
+          if [ -z "${CURSOR_API_KEY:-}" ]; then
+            echo "::error::Secret CURSOR_API_KEY が未設定です。"
+            exit 1
+          fi
+
+      - name: Launch Cursor Cloud Agent (FEEDBACK.md)
+        env:
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+        run: |
+          set -euo pipefail
+
+          PROMPT="$(cat FEEDBACK.md)"
+          COMMIT_MSG="${{ github.event.head_commit.message }}"
+          COMMIT_SHA="${{ github.sha }}"
+
+          PROMPT="${PROMPT}"$'\n\n'"--- トリガー情報 ---"
+          PROMPT="${PROMPT}"$'\n'"直近のコミットメッセージ: ${COMMIT_MSG}"
+          PROMPT="${PROMPT}"$'\n'"コミット SHA: ${COMMIT_SHA}"
+          PROMPT="${PROMPT}"$'\n'"まず git pull して、このコミットで変更された 宿題/*.md を添削してください。"
+          PROMPT="${PROMPT}"$'\n'"main ブランチに直接 commit & push してください（PR は作らない）。"
+          PROMPT="${PROMPT}"$'\n'"コミットメッセージは必ず「AIフィードバック: <ファイル名>」の形式にしてください。"
+
+          if [ -f 監視銘柄.json ]; then
+            PROMPT="${PROMPT}"$'\n\n'"--- 監視銘柄.json ---"
+            PROMPT="${PROMPT}"$'\n'"$(cat 監視銘柄.json)"
+          fi
+
+          JST_DATE="$(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M')"
+          BODY=$(PROMPT="$PROMPT" JST_DATE="$JST_DATE" python3 - <<'PY'
+          import json, os
+          prompt = os.environ["PROMPT"]
+          jst = os.environ["JST_DATE"]
+          body = {
+            "prompt": {"text": prompt},
+            "name": f"Homework feedback {jst}",
+            "repos": [
+              {
+                "url": "https://github.com/tomoki4917/stock",
+                "startingRef": "main",
+              }
+            ],
+            "workOnCurrentBranch": True,
+            "autoCreatePR": False,
+          }
+          print(json.dumps(body, ensure_ascii=False))
+          PY
+          )
+
+          echo "Launching Cursor Cloud Agent for feedback…"
+          HTTP_CODE=$(curl --silent --show-error --output /tmp/cursor-agent-response.json --write-out "%{http_code}" \
+            --request POST \
+            --url "https://api.cursor.com/v1/agents" \
+            -u "${CURSOR_API_KEY}:" \
+            --header "Content-Type: application/json" \
+            --data "$BODY")
+
+          echo "HTTP status: ${HTTP_CODE}"
+          cat /tmp/cursor-agent-response.json
+          echo
+
+          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+            echo "::error::Cursor Cloud Agents API が失敗しました (HTTP ${HTTP_CODE})"
+            exit 1
+          fi
+
+          python3 - <<'PY'
+          import json
+          with open("/tmp/cursor-agent-response.json") as f:
+            data = json.load(f)
+          agent = data.get("agent") or {}
+          run = data.get("run") or {}
+          print(f"agent.id: {agent.get('id')}")
+          print(f"agent.url: {agent.get('url')}")
+          print(f"run.id: {run.get('id')}")
+          print(f"run.status: {run.get('status')}")
+          PY

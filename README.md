@@ -71,6 +71,7 @@
 | `DAILY.md` / `自動化/宿題生成指示.md` | 宿題生成エージェントへの指示文 |
 | `FEEDBACK.md` / `自動化/添削指示.md` | 回答提出後の添削エージェントへの指示文 |
 | `.github/workflows/daily-homework.yml` | 毎朝4時（JST）に Cursor Cloud Agent を起動するスケジューラ |
+| `.github/workflows/homework-feedback.yml` | 宿題回答の push を検知して AI 添削を起動 |
 
 ### 毎朝4時が動かないときのチェック（必須）
 1. GitHub → Settings → Secrets → Actions に **`CURSOR_API_KEY`** があるか  
@@ -79,6 +80,12 @@
 3. Cursor 側で `tomoki4917/stock` への GitHub 書き込み連携が有効か（main へ直接 push する）
 
 ※ 指示ファイルだけではスケジュールは動かない。起動は GitHub Actions → Cursor API が担う。
+
+### 添削（AIアドバイス）が届かないとき
+1. 保存後、GitHub → Actions → **Homework feedback** が起動しているか確認
+2. `CURSOR_API_KEY` が設定されているか（Daily homework と共通）
+3. 添削完了まで **5〜15分** かかることがある（Cloud Agent の処理時間）
+4. 手動で再実行: Actions → Homework feedback → Run workflow
 
 ## フォルダ構成
 ```
