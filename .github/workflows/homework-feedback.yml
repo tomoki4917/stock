@@ -1,15 +1,4 @@
-# 宿題回答（スマホから保存）の push を検知し、Cursor Cloud Agent で AI 添削を実行する。
-#
-# 流れ:
-#   1. 宿題ノートアプリが「宿題回答（スマホから）」で commit & push
-#   2. このワークフローが FEEDBACK.md をプロンプトに Cursor Agent を起動
-#   3. Agent が「AIフィードバック: <ファイル名>」で commit & push
-#   4. アプリがその commit を検知して添削を表示
-#
-# 事前準備: CURSOR_API_KEY（Daily homework と同じ Secret）
-# 手動テスト: Actions → Homework feedback → Run workflow
-
-name: Homework feedback
+name: Homework feedback (Gemini)
 
 on:
   push:
@@ -19,105 +8,283 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  launch-feedback-agent:
-    # 無限ループ防止: 宿題回答の commit のみ（AIフィードバック自身では起動しない）
+  feedback:
+    # 無限ループ防止:
+    # - 宿題回答（スマホから）の commit のみ
+    # - AIフィードバック commit は除外
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      contains(github.event.head_commit.message, '宿題回答')
+      (contains(github.event.head_commit.message, '宿題回答') && !contains(github.event.head_commit.message, 'AIフィードバック'))
+
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 8
+
+    env:
+      TZ: Asia/Tokyo
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GEMINI_MODEL: gemini-1.5-flash
+
     steps:
-      - name: Checkout (for FEEDBACK.md prompt)
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 2
 
-      - name: Log trigger
+      - name: Validate secret
         run: |
-          echo "Event: ${{ github.event_name }}"
-          echo "Commit: ${{ github.sha }}"
-          echo "Message: ${{ github.event.head_commit.message }}"
-
-      - name: Require CURSOR_API_KEY
-        env:
-          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
-        run: |
-          if [ -z "${CURSOR_API_KEY:-}" ]; then
-            echo "::error::Secret CURSOR_API_KEY が未設定です。"
+          if [ -z "${GEMINI_API_KEY:-}" ]; then
+            echo "::error::Secret GEMINI_API_KEY が未設定です。GitHub → Settings → Secrets に追加してください。"
             exit 1
           fi
 
-      - name: Launch Cursor Cloud Agent (FEEDBACK.md)
-        env:
-          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+      - name: Determine changed homework files
+        id: changed
         run: |
           set -euo pipefail
-
-          PROMPT="$(cat FEEDBACK.md)"
-          COMMIT_MSG="${{ github.event.head_commit.message }}"
-          COMMIT_SHA="${{ github.sha }}"
-
-          PROMPT="${PROMPT}"$'\n\n'"--- トリガー情報 ---"
-          PROMPT="${PROMPT}"$'\n'"直近のコミットメッセージ: ${COMMIT_MSG}"
-          PROMPT="${PROMPT}"$'\n'"コミット SHA: ${COMMIT_SHA}"
-          PROMPT="${PROMPT}"$'\n'"まず git pull して、このコミットで変更された 宿題/*.md を添削してください。"
-          PROMPT="${PROMPT}"$'\n'"main ブランチに直接 commit & push してください（PR は作らない）。"
-          PROMPT="${PROMPT}"$'\n'"コミットメッセージは必ず「AIフィードバック: <ファイル名>」の形式にしてください。"
-
-          if [ -f 監視銘柄.json ]; then
-            PROMPT="${PROMPT}"$'\n\n'"--- 監視銘柄.json ---"
-            PROMPT="${PROMPT}"$'\n'"$(cat 監視銘柄.json)"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "files=" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          # この commit で変更された 宿題/*.md を列挙（複数可）
+          FILES="$(git show --name-only --pretty='' "${{ github.sha }}" | grep -E '^宿題/.*\.md$' || true)"
+          # 改行をスペースに変換
+          FILES="$(echo "$FILES" | tr '\n' ' ' | xargs echo -n)"
+          echo "files=${FILES}" >> "$GITHUB_OUTPUT"
 
-          JST_DATE="$(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M')"
-          BODY=$(PROMPT="$PROMPT" JST_DATE="$JST_DATE" python3 - <<'PY'
-          import json, os
-          prompt = os.environ["PROMPT"]
-          jst = os.environ["JST_DATE"]
-          body = {
-            "prompt": {"text": prompt},
-            "name": f"Homework feedback {jst}",
-            "repos": [
-              {
-                "url": "https://github.com/tomoki4917/stock",
-                "startingRef": "main",
-              }
-            ],
-            "workOnCurrentBranch": True,
-            "autoCreatePR": False,
-          }
-          print(json.dumps(body, ensure_ascii=False))
-          PY
-          )
-
-          echo "Launching Cursor Cloud Agent for feedback…"
-          HTTP_CODE=$(curl --silent --show-error --output /tmp/cursor-agent-response.json --write-out "%{http_code}" \
-            --request POST \
-            --url "https://api.cursor.com/v1/agents" \
-            -u "${CURSOR_API_KEY}:" \
-            --header "Content-Type: application/json" \
-            --data "$BODY")
-
-          echo "HTTP status: ${HTTP_CODE}"
-          cat /tmp/cursor-agent-response.json
-          echo
-
-          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
-            echo "::error::Cursor Cloud Agents API が失敗しました (HTTP ${HTTP_CODE})"
-            exit 1
+      - name: Gemini feedback + commit
+        run: |
+          set -euo pipefail
+          if [ -z "${{ steps.changed.outputs.files }}" ]; then
+            echo "No changed homework files."
+            exit 0
           fi
 
           python3 - <<'PY'
-          import json
-          with open("/tmp/cursor-agent-response.json") as f:
-            data = json.load(f)
-          agent = data.get("agent") or {}
-          run = data.get("run") or {}
-          print(f"agent.id: {agent.get('id')}")
-          print(f"agent.url: {agent.get('url')}")
-          print(f"run.id: {run.get('id')}")
-          print(f"run.status: {run.get('status')}")
+          import json, os, re, subprocess
+          from datetime import datetime
+
+          GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+          GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash")
+          TZ_DATE = subprocess.check_output(["date", "+%m/%d"], text=True).strip()
+
+          changed_files = os.environ["CHANGED_FILES"].split()
+
+          FEEDBACK_INSTRUCTIONS_PATH = "FEEDBACK.md"
+          with open(FEEDBACK_INSTRUCTIONS_PATH, "r", encoding="utf-8") as f:
+            feedback_md = f.read()
+
+          watchlist_text = ""
+          if os.path.exists("監視銘柄.json"):
+            with open("監視銘柄.json", "r", encoding="utf-8") as f:
+              watchlist_text = f.read()
+
+          def parse_questions(text: str):
+            lines = text.splitlines()
+            # セクション: ### Q1 ... / ### Q2 ... / ... / ## AIからのフィードバック
+            q_starts = []
+            ai_header_idx = None
+            for i, line in enumerate(lines):
+              if line.startswith("### Q"):
+                m = re.match(r"^###\s+(Q\d+)\b", line)
+                if m:
+                  q_starts.append((m.group(1), i))
+              if line.startswith("## AIからのフィードバック"):
+                ai_header_idx = i
+            q_starts_sorted = sorted(q_starts, key=lambda x: x[1])
+
+            sections = []
+            for idx, (qkey, start) in enumerate(q_starts_sorted):
+              end = ai_header_idx if ai_header_idx is not None else len(lines)
+              if idx + 1 < len(q_starts_sorted):
+                end = q_starts_sorted[idx+1][1]
+              # answer block: contiguous lines that startwith '>' within [start,end)
+              answer_lines = []
+              answer_start = answer_end = None
+              j = start
+              while j < end:
+                if lines[j].startswith(">"):
+                  # start contiguous block
+                  answer_start = j
+                  k = j
+                  while k < end and lines[k].startswith(">"):
+                    answer_lines.append(lines[k])
+                    k += 1
+                  answer_end = k - 1
+                  j = k
+                  break
+                j += 1
+              # answered?
+              joined = "\n".join([ln.lstrip("> ").rstrip() for ln in answer_lines]).strip()
+              answered = bool(joined) and joined != "（ここに記入）"
+              sections.append({
+                "qkey": qkey,
+                "start": start,
+                "end": end,
+                "answer_start": answer_start,
+                "answer_end": answer_end,
+                "answer_text": joined,
+                "answered": answered,
+              })
+            return sections, ai_header_idx, lines
+
+          def extract_prompt_parts(file_text: str):
+            sections, ai_header_idx, _lines = parse_questions(file_text)
+            # Qごとの学生回答だけ送る（AIコメント挿入はスクリプト側で行うので、回答ブロックの改変は避ける）
+            payload = []
+            for s in sections:
+              if s["answered"]:
+                payload.append({
+                  "question": s["qkey"],
+                  "answer": s["answer_text"],
+                })
+            return payload
+
+          def gemini_generate(payload):
+            # strict JSONのみ返すように要求（スクリプトで再利用）
+            prompt = f"""
+{feedback_md}
+
+--- 対象宿題（学生回答のみ） ---
+{json.dumps(payload, ensure_ascii=False)}
+
+--- 追加情報 ---
+（必要ならここも参考）監視銘柄.json：
+{watchlist_text}
+
+今日の日付: {TZ_DATE}
+
+出力要件（最重要）:
+1) 返信は JSON だけ（前後に文章を付けない）
+2) JSON スキーマ:
+{{
+  "q_comments": {{
+    "Q1": ["良い点: ...", "惜しい点/訂正: ...", "次に調べる用語: ..."],
+    "Q2": ["...","...","..."]
+  }},
+  "overall": ["総評（短く）: ..."]
+}}
+3) 各 Q コメント配列は必ず3要素
+4) 用語や指摘は初心者向けに短く、事実/推測を分けて書く
+"""
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+            body = {
+              "contents": [{
+                "parts": [{"text": prompt}]
+              }],
+              "generationConfig": {
+                "temperature": 0.4
+              }
+            }
+            res = subprocess.check_output(["curl", "-sS", "-X", "POST", url,
+              "-H", "Content-Type: application/json",
+              "--data", json.dumps(body, ensure_ascii=False)
+            ], text=True)
+            data = json.loads(res)
+            text = data["candidates"][0]["content"]["parts"][0].get("text", "")
+            # JSON抽出（念のため）
+            m = re.search(r"{.*}", text, re.S)
+            if not m:
+              raise RuntimeError("Gemini output does not contain JSON")
+            return json.loads(m.group(0))
+
+          def rewrite_file(path: str):
+            with open(path, "r", encoding="utf-8") as f:
+              original = f.read()
+            sections, ai_header_idx, lines = parse_questions(original)
+            payload = extract_prompt_parts(original)
+            if not payload:
+              # 未回答なら何もしない
+              return False
+
+            model_out = gemini_generate(payload)
+            q_comments = model_out.get("q_comments", {})
+            overall = model_out.get("overall", ["総評: ありがとうございました。"])
+
+            # 既存の学生回答（>行）を絶対に変更しないため、行は差し込むだけにする
+            insert_map = {}  # answer_end idx -> list[str]
+            for s in sections:
+              qkey = s["qkey"]
+              if not s["answered"]:
+                continue
+              ans_end = s["answer_end"]
+              if ans_end is None:
+                continue
+              bullets = q_comments.get(qkey)
+              if not bullets:
+                continue
+              block = []
+              block.append(f"**AIコメント（{TZ_DATE}）**")
+              for b in bullets:
+                # b は "良い点: ..." のような想定
+                block.append(f"- {b}")
+              insert_map[ans_end] = block
+
+            # overall: AIフィードバック欄の（>（未提出））を置換
+            out_lines = []
+            for i, line in enumerate(lines):
+              out_lines.append(line)
+              if i in insert_map:
+                out_lines.extend(insert_map[i])
+
+              if ai_header_idx is not None and i == ai_header_idx:
+                # 次の行以降で（未提出）を除去するが、ここではそのまま。
+                pass
+
+            if ai_header_idx is not None:
+              # AIフィードバック直後の（>（未提出））を置換して総評を差し込む。
+              new_out = []
+              i = 0
+              header = "## AIからのフィードバック（提出後に記入される）"
+              while i < len(out_lines):
+                line = out_lines[i]
+                if line.startswith("## AIからのフィードバック"):
+                  new_out.append(line)
+                  i += 1
+                  # placeholder（未提出）行だけスキップ（> 付き）
+                  while i < len(out_lines) and out_lines[i].strip().startswith(">") and "（未提出）" in out_lines[i]:
+                    i += 1
+                  new_out.extend([
+                    "",
+                    "**総評（{date}時点）**".format(date=TZ_DATE),
+                    *[f"- {x}" for x in overall],
+                    ""
+                  ])
+                  continue
+                new_out.append(line)
+                i += 1
+              out_text = "\n".join(new_out) + "\n"
+            else:
+              out_text = "\n".join(out_lines) + "\n"
+
+            if out_text == original:
+              return False
+            with open(path, "w", encoding="utf-8") as f:
+              f.write(out_text)
+            return True
+
+          os.environ["CHANGED_FILES"] = " ".join(changed_files)
+          changed_any = False
+          for path in changed_files:
+            changed = rewrite_file(path)
+            changed_any = changed_any or changed
+
+          if not changed_any:
+            print("No files needed rewriting.")
+            raise SystemExit(0)
+
+          # commit & push (GITHUB_TOKEN)
+          subprocess.check_call(["git", "config", "user.name", "github-actions[bot]"])
+          subprocess.check_call(["git", "config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com"])
+
+          # アップデート対象のみ commit（単純化のため全変更をまとめる）
+          subprocess.check_call(["git", "add", "宿題"])
+          # どのファイル向けの添削か分かるように先頭ファイル名を入れる
+          commit_target = changed_files[0] if changed_files else "宿題"
+          subprocess.check_call(["git", "commit", "-m", f"AIフィードバック: {commit_target}"])
+          subprocess.check_call(["git", "push"])
           PY
+        env:
+          CHANGED_FILES: ${{ steps.changed.outputs.files }}
