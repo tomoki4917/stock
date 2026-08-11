@@ -57,6 +57,10 @@ jobs:
 
           PROMPT="$(cat DAILY.md)"
           PROMPT="${PROMPT}"$'\n\n'"補足: 日本時間の今日の日付は $(TZ=Asia/Tokyo date '+%Y-%m-%d') です。main ブランチに直接 commit & push してください（PR は作らない）。"
+          if [ -f 監視銘柄.json ]; then
+            PROMPT="${PROMPT}"$'\n\n'"--- 現在の監視銘柄.json ---"
+            PROMPT="${PROMPT}"$'\n'"$(cat 監視銘柄.json)"
+          fi
 
           # JSON 用にプロンプトをエスケープ
           JST_DATE="$(TZ=Asia/Tokyo date '+%Y-%m-%d')"
