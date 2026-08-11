@@ -18,27 +18,6 @@ DEFAULT_MODELS = [
     "gemini-1.5-flash",
 ]
 
-RESPONSE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "q_comments": {
-            "type": "object",
-            "additionalProperties": {
-                "type": "array",
-                "items": {"type": "string"},
-                "minItems": 3,
-                "maxItems": 3,
-            },
-        },
-        "overall": {
-            "type": "array",
-            "items": {"type": "string"},
-            "minItems": 1,
-        },
-    },
-    "required": ["q_comments", "overall"],
-}
-
 
 def parse_questions(text: str):
     lines = text.splitlines()
@@ -107,8 +86,7 @@ def call_gemini(model: str, prompt: str) -> dict:
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "temperature": 0.4,
-            "responseMimeType": "application/json",
-            "responseSchema": RESPONSE_SCHEMA,
+            # structured output（responseSchema）を使わないことで互換性エラーを回避する
         },
     }
     req = urllib.request.Request(
@@ -145,6 +123,7 @@ def call_gemini(model: str, prompt: str) -> dict:
 
 
 def gemini_generate(payload, feedback_md, watchlist_text, tz_date):
+    # responseSchema は使わず、「JSONだけ返す」ことを強制する
     prompt = (
         f"{feedback_md}\n\n"
         f"--- 対象宿題（学生回答のみ） ---\n"
@@ -152,8 +131,12 @@ def gemini_generate(payload, feedback_md, watchlist_text, tz_date):
         f"--- 追加情報 ---\n"
         f"監視銘柄.json:\n{watchlist_text}\n\n"
         f"今日の日付: {tz_date}\n\n"
-        "各回答済み設問について q_comments に3行（良い点/惜しい点/次に調べる用語）を書く。"
-        "overall には短い総評を1行以上書く。"
+        "出力は必ず JSON のみ（前後に文章を入れない）。"
+        "JSONスキーマは次の形にすること:\n"
+        "{\n"
+        '  "q_comments": { "Q1": ["良い点", "惜しい点/訂正", "次に調べる用語"], "Q2": ["...","...","..."] },\n'
+        '  "overall": ["総評（短く）"]\n'
+        "}\n"
     )
 
     preferred = os.environ.get("GEMINI_MODEL", "").strip()
