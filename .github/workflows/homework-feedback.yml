@@ -54,11 +54,20 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             LATEST="$(ls -1t 宿題/*.md 2>/dev/null | head -1 || true)"
             echo "files=${LATEST}" >> "$GITHUB_OUTPUT"
+            echo "Detected (manual): ${LATEST}"
             exit 0
           fi
-          FILES="$(git show --name-only --pretty='' "${{ github.sha }}" | grep -E '^宿題/.*\.md$' || true)"
+          # 日本語パスが octal 表示されると grep が外れるため quotepath=false
+          FILES="$(git -c core.quotepath=false show --name-only --pretty='' "${{ github.sha }}" | grep -E '(^|/)宿題/.*\.md$' || true)"
+          if [ -z "${FILES}" ]; then
+            # フォールバック: 直近コミットで宿題配下に変更があれば最新ファイルを使う
+            if git -c core.quotepath=false show --name-only --pretty='' "${{ github.sha }}" | grep -q '宿題/'; then
+              FILES="$(ls -1t 宿題/*.md 2>/dev/null | head -1 || true)"
+            fi
+          fi
           FILES="$(echo "$FILES" | tr '\n' ' ' | xargs echo -n)"
           echo "files=${FILES}" >> "$GITHUB_OUTPUT"
+          echo "Detected: ${FILES}"
 
       - name: Gemini feedback + commit
         if: steps.changed.outputs.files != ''
