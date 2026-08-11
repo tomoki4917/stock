@@ -6,6 +6,8 @@ import os
 import re
 import subprocess
 import sys
+import time
+import traceback
 import urllib.error
 import urllib.request
 
@@ -297,5 +299,26 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as exc:
+        # Actions のジョブログがAPIで取得しにくいことがあるため、
+        # 例外内容をリポジトリ内へ（.debug/）書き出して確認できるようにする。
+        try:
+            os.makedirs(".debug", exist_ok=True)
+            ts = int(time.time())
+            err_path = f".debug/gemini_error_{ts}.txt"
+            with open(err_path, "w", encoding="utf-8") as f:
+                f.write("ERROR: " + str(exc) + "\n\n")
+                f.write(traceback.format_exc())
+            subprocess.check_call(["git", "config", "user.name", "github-actions[bot]"])
+            subprocess.check_call(
+                ["git", "config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com"]
+            )
+            subprocess.check_call(["git", "add", err_path])
+            subprocess.check_call(["git", "commit", "-m", f"Gemini debug: {ts}"])
+            # push して確認できるようにする（添削結果は失敗のままでOK）
+            git_push()
+        except Exception:
+            # デバッグコミット自体に失敗しても元のエラーは失敗として返す
+            pass
+
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(1)
