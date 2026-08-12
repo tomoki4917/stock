@@ -68,11 +68,19 @@ def parse_questions(text: str):
 
 
 def extract_prompt_parts(file_text: str):
-    sections, _, _ = parse_questions(file_text)
+    sections, _, lines = parse_questions(file_text)
     payload = []
     for s in sections:
         if s["answered"]:
-            payload.append({"question": s["qkey"], "answer": s["answer_text"]})
+            q_end = s["answer_start"] if s["answer_start"] is not None else s["end"]
+            q_text = "\n".join(lines[s["start"]:q_end]).strip()
+            payload.append(
+                {
+                    "question": s["qkey"],
+                    "question_text": q_text,
+                    "answer": s["answer_text"],
+                }
+            )
     return payload
 
 
@@ -122,20 +130,24 @@ def call_gemini(model: str, prompt: str) -> dict:
         return json.loads(m.group(0))
 
 
-def gemini_generate(payload, feedback_md, watchlist_text, tz_date):
+def gemini_generate(payload, feedback_md, watchlist_text, tz_date, homework_text=""):
     # responseSchema は使わず、「JSONだけ返す」ことを強制する
     prompt = (
         f"{feedback_md}\n\n"
-        f"--- 対象宿題（学生回答のみ） ---\n"
+        f"--- 宿題ファイル全文（出典・ヒント・市場の数字をダメ出しに使う） ---\n"
+        f"{homework_text}\n\n"
+        f"--- 今回コメントする回答 ---\n"
         f"{json.dumps(payload, ensure_ascii=False)}\n\n"
         f"--- 追加情報 ---\n"
         f"監視銘柄.json:\n{watchlist_text}\n\n"
-        f"今日の日付: {tz_date}\n\n"
+        f"今日の日付: {tz_date}\n"
+        "学習の現在地: 情報収集能力（記事から数字と主因を拾い、自分の言葉で3行に落とす）\n\n"
         "出力は必ず JSON のみ（前後に文章を入れない）。"
+        "q_comments の配列は必ず4要素: 良い点 / ダメ出し / 次のまとめ方 / 次に調べる用語。\n"
         "JSONスキーマは次の形にすること:\n"
         "{\n"
-        '  "q_comments": { "Q1": ["良い点", "惜しい点/訂正", "次に調べる用語"], "Q2": ["...","...","..."] },\n'
-        '  "overall": ["総評（短く）"]\n'
+        '  "q_comments": { "Q1": ["良い点", "ダメ出し", "次のまとめ方", "次に調べる用語"] },\n'
+        '  "overall": ["良い点（短く）", "一番大きい伸びしろ（ダメ出し）", "次回復習するまとめの型"]\n'
         "}\n"
     )
 
@@ -166,7 +178,9 @@ def rewrite_file(path: str, feedback_md: str, watchlist_text: str, tz_date: str)
         print(f"No answered questions in {path}")
         return False
 
-    model_out = gemini_generate(payload, feedback_md, watchlist_text, tz_date)
+    model_out = gemini_generate(
+        payload, feedback_md, watchlist_text, tz_date, homework_text=original
+    )
     q_comments = model_out.get("q_comments", {})
     overall = model_out.get("overall", ["総評: ありがとうございました。"])
 
@@ -181,7 +195,7 @@ def rewrite_file(path: str, feedback_md: str, watchlist_text: str, tz_date: str)
         if not bullets:
             continue
         block = [f"**AIコメント（{tz_date}）**"]
-        block.extend(f"- {b}" for b in bullets[:3])
+        block.extend(f"- {b}" for b in bullets[:4])
         insert_map[ans_end] = block
 
     out_lines = []
